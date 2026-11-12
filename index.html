@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="A tiny glass-fronted wooden bookshelf full of miniature foam books. Shake it, then sort it.">
+  <meta name="theme-color" content="#2b211b">
+  <title>Anxiety Bookshelf</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="bar top">
+    <h1>Anxiety Bookshelf</h1>
+    <div class="stat" aria-live="off">
+      <span><b id="standing">0</b> / <span id="total">0</span> standing</span>
+      <div class="meter" aria-hidden="true"><div id="meterFill"></div></div>
+    </div>
+    <button id="btnHelp" class="ghost" aria-expanded="false" aria-controls="help" title="How to use">?</button>
+  </header>
+
+  <section id="help" class="help" hidden>
+    <p><b>Shake:</b> grab the cabinet and jiggle it, press <kbd>Space</kbd>, tap <b>Shake</b>, or shake your phone.</p>
+    <p><b>Knock:</b> tap the wooden frame or use <kbd>←</kbd> <kbd>→</kbd>.</p>
+    <p><b>Sort:</b> open the glass door (tap the brass knob or press <kbd>O</kbd>), then pick books up and drop them back where they belong. Every book you place stands up straight. Tap a fallen book to stand it up.</p>
+    <p><b>Short on time?</b> The straighten, rainbow and height buttons tidy the shelves for you.</p>
+  </section>
+
+  <main id="stage">
+    <canvas id="scene" role="img" aria-label="A glass-fronted wooden bookshelf filled with miniature books"></canvas>
+    <div id="toast" role="status" aria-live="polite"></div>
+  </main>
+
+  <footer class="bar bottom">
+    <div class="group">
+      <button id="btnShake" class="primary">Shake</button>
+      <button id="btnDoor">Open door</button>
+    </div>
+    <div class="group" role="group" aria-label="Auto-sort">
+      <button id="btnTidy" title="Stand every book up, keeping its shelf">Straighten</button>
+      <button id="btnRainbow" title="Sort all books by colour">Rainbow</button>
+      <button id="btnHeight" title="Tallest to shortest on each shelf">By height</button>
+    </div>
+    <div class="group">
+      <label class="count">Books
+        <input type="range" id="count" min="200" max="260" step="1" value="230">
+        <output id="countOut" for="count">230</output>
+      </label>
+      <button id="btnSound" aria-pressed="true" title="Toggle sound">Sound on</button>
+      <button id="btnMotion" hidden>Use phone motion</button>
+    </div>
+  </footer>
+
+  <script src="vendor/matter.min.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
