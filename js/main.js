@@ -15,7 +15,8 @@
 
   // ---------------------------------------------------------------- layout
   const W = 600;
-  const H = 820;
+  const H = 884;
+  const DESK_Y = 860; // where spilled books come to rest, in front of the cabinet
   const CASE = { x: 50, y: 34, w: 500, h: 752 };
   const FRAME = 24;
   const BASE = 40;
@@ -46,15 +47,31 @@
 
   const CAT_WALL = 0x0001;
   const CAT_BOOK = 0x0002;
+  const CAT_DESK = 0x0004;
+  const CAT_OUT = 0x0008;
+  const SHELF_FILTER = () => ({ group: 0, category: CAT_BOOK, mask: CAT_WALL | CAT_BOOK });
+  const DESK_FILTER = () => ({ group: 0, category: CAT_OUT, mask: CAT_DESK | CAT_OUT });
+  const SPILL_RATE = 0.0022; // per physics step, scaled by how hard the shake is
 
-  const engine = Engine.create({
-    positionIterations: 10,
-    velocityIterations: 8,
-    constraintIterations: 2,
-    enableSleeping: false,
-  });
+  const engineOpts = { positionIterations: 10, velocityIterations: 8, constraintIterations: 2, enableSleeping: false };
+  // Books on the shelves live in the cabinet's (shaking) frame...
+  const engine = Engine.create(engineOpts);
   engine.gravity.scale = GRAVITY_SCALE;
   const world = engine.world;
+  // ...books that spill out land on the desk, which stays still.
+  const deskEngine = Engine.create(engineOpts);
+  deskEngine.gravity.scale = GRAVITY_SCALE;
+  const deskWorld = deskEngine.world;
+  {
+    const opts = { isStatic: true, friction: 0.9, restitution: 0.08, collisionFilter: { category: CAT_DESK } };
+    const desk = [
+      Bodies.rectangle(W / 2, DESK_Y + 50, W * 3, 100, opts),
+      Bodies.rectangle(-50, H / 2, 100, H * 3, opts),
+      Bodies.rectangle(W + 50, H / 2, 100, H * 3, opts),
+    ];
+    desk.forEach((d) => { d.label = 'desk'; });
+    Composite.add(deskWorld, desk);
+  }
 
   function addWalls() {
     const opts = { isStatic: true, friction: 0.8, restitution: 0.05, collisionFilter: { category: CAT_WALL } };
@@ -97,14 +114,6 @@
   const rand = (a, b) => a + (b - a) * rng();
   const pick = (arr) => arr[Math.floor(rng() * arr.length)];
 
-  function shade(hex, amt) {
-    const n = parseInt(hex.slice(1), 16);
-    let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-    const f = (c) => Math.max(0, Math.min(255, Math.round(amt < 0 ? c * (1 + amt) : c + (255 - c) * amt)));
-    r = f(r); g = f(g); b = f(b);
-    return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
-  }
-
   function hsl(hex) {
     const n = parseInt(hex.slice(1), 16);
     const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
@@ -122,77 +131,120 @@
     return { h, s, l };
   }
 
-  function makeLook(color) {
-    const trim = pick(TRIMS.filter((t) => t !== color));
-    const r = rng();
+  // Every book is generated from its own seed, so a saved shelf only needs
+  // the seed plus where the book is.
+  function bookSpec(seed) {
+    const r = mulberry32(seed);
+    const rr = (a, b) => a + (b - a) * r();
+    const pk = (arr) => arr[Math.floor(r() * arr.length)];
+    const w = rr(5.5, 9);
+    const tall = r();
+    const h = tall < 0.15 ? rr(88, 102) : tall < 0.75 ? rr(66, 88) : rr(54, 66);
+    const color = pk(PALETTE);
+    const trim = pk(TRIMS.filter((t) => t !== color));
+    const style = r();
     const bands = [];
     let label = null;
-    if (r < 0.32) {
-      const t = rand(0.05, 0.1);
+    if (style < 0.32) {
+      const t = rr(0.05, 0.1);
       bands.push({ y: t, h: 0.035 }, { y: 1 - t - 0.035, h: 0.035 });
-    } else if (r < 0.55) {
-      bands.push({ y: rand(0.28, 0.45), h: rand(0.12, 0.22) });
-    } else if (r < 0.75) {
-      label = { y: rand(0.12, 0.2), h: rand(0.22, 0.32) };
-    } else if (r < 0.9) {
+    } else if (style < 0.55) {
+      bands.push({ y: rr(0.28, 0.45), h: rr(0.12, 0.22) });
+    } else if (style < 0.75) {
+      label = { y: rr(0.12, 0.2), h: rr(0.22, 0.32) };
+    } else if (style < 0.9) {
       bands.push({ y: 0.06, h: 0.05 });
     }
-    return {
-      color,
-      light: shade(color, 0.22),
-      dark: shade(color, -0.32),
-      trim,
-      bands,
-      label,
-      title: { y: rand(0.3, 0.42), len: rand(0.22, 0.4) },
-      dot: rng() < 0.25,
-    };
+    const look = { color, trim, bands, label, title: { y: rr(0.3, 0.42), len: rr(0.22, 0.4) }, dot: r() < 0.25 };
+    return { w, h, look };
   }
 
-  function createBooks(count) {
-    if (books.length) Composite.remove(world, books);
+  function makeBook(seed, x, y, angle, out) {
+    const sp = bookSpec(seed);
+    const body = Bodies.rectangle(x, y, sp.w, sp.h, {
+      angle,
+      friction: 0.55,
+      frictionStatic: 0.9,
+      frictionAir: 0.012,
+      restitution: 0.04,
+      density: 0.0015,
+      slop: 0.03,
+      collisionFilter: out ? DESK_FILTER() : SHELF_FILTER(),
+    });
+    body.label = 'book';
+    const c = hsl(sp.look.color);
+    body.book = { seed, w: sp.w, h: sp.h, look: sp.look, hue: c.h, sat: c.s, lig: c.l, lift: 0, out: !!out };
+    Composite.add(out ? deskWorld : world, body);
+    books.push(body);
+    return body;
+  }
+
+  function clearBooks() {
+    books.forEach((bd) => { Composite.remove(world, bd); Composite.remove(deskWorld, bd); });
     books = [];
     held = null;
     tweens.clear();
+  }
 
+  const newSeed = () => (Math.floor(rng() * 0xffffffff) >>> 0) || 1;
+
+  function createBooks(count) {
+    clearBooks();
     const perShelf = Array.from({ length: SHELVES }, (_, i) =>
       Math.floor(count / SHELVES) + (i < count % SHELVES ? 1 : 0));
 
-    let id = 0;
     perShelf.forEach((n, s) => {
-      const specs = [];
-      for (let i = 0; i < n; i++) {
-        const tall = rng();
-        specs.push({
-          w: rand(5.5, 9),
-          h: tall < 0.15 ? rand(88, 102) : tall < 0.75 ? rand(66, 88) : rand(54, 66),
-        });
-      }
-      const total = specs.reduce((a, b) => a + b.w, 0);
-      const gap = Math.min(0.9, Math.max(0.2, (INNER_W - 6 - total) / (n + 1)));
+      const seeds = Array.from({ length: n }, newSeed);
+      const specs = seeds.map(bookSpec);
+      const sum = specs.reduce((a, b) => a + b.w, 0);
+      const gap = Math.min(0.9, Math.max(0.2, (INNER_W - 6 - sum) / (n + 1)));
       let x = INNER.l + 2;
-      specs.forEach((sp) => {
-        const color = pick(PALETTE);
-        const body = Bodies.rectangle(x + sp.w / 2, COMPS[s].floor - sp.h / 2 - 0.2, sp.w, sp.h, {
-          friction: 0.55,
-          frictionStatic: 0.9,
-          frictionAir: 0.012,
-          restitution: 0.04,
-          density: 0.0015,
-          slop: 0.03,
-          collisionFilter: { category: CAT_BOOK, mask: CAT_WALL | CAT_BOOK },
-        });
-        body.label = 'book';
-        const c = hsl(color);
-        body.book = { id: id++, w: sp.w, h: sp.h, look: makeLook(color), hue: c.h, sat: c.s, lig: c.l, lift: 0 };
-        books.push(body);
+      specs.forEach((sp, i) => {
+        makeBook(seeds[i], x + sp.w / 2, COMPS[s].floor - sp.h / 2 - 0.2, 0, false);
         x += sp.w + gap;
       });
     });
-    Composite.add(world, books);
     total.textContent = books.length;
     everMessy = false;
     celebrated = true;
+    saveState();
+  }
+
+  // ------------------------------------------------------------ save/load
+  // About 35 bytes per book: [seed, onDesk, x, y, angle]. 260 books ≈ 9 KB.
+  const STATE_VERSION = 1;
+
+  function saveState() {
+    if (!books.length) return;
+    const r1 = (v) => Math.round(v * 10) / 10;
+    const data = books.map((bd) => {
+      const tw = tweens.get(bd);
+      if (tw) return [bd.book.seed, 0, r1(tw.tx), r1(tw.ty), 0];
+      const out = bd.book.out || (held && held.body === bd);
+      return [bd.book.seed, out ? 1 : 0, r1(bd.position.x), r1(bd.position.y), Math.round(normAngle(bd.angle) * 1000) / 1000];
+    });
+    store.set('state', { v: STATE_VERSION, door: door.target > 0.5 ? 1 : 0, books: data });
+  }
+
+  function loadState() {
+    const st = store.get('state', null);
+    if (!st || st.v !== STATE_VERSION || !Array.isArray(st.books)) return false;
+    if (st.books.length < 200 || st.books.length > 260) return false;
+    clearBooks();
+    try {
+      for (const [seed, out, x, y, a] of st.books) {
+        if (![seed, x, y, a].every(Number.isFinite)) throw new Error('bad book');
+        makeBook(seed >>> 0, x, y, a, !!out);
+      }
+    } catch (e) {
+      clearBooks();
+      return false;
+    }
+    if (st.door) { door.target = 1; door.open = 1; btnDoor.textContent = 'Close door'; }
+    total.textContent = books.length;
+    everMessy = !books.every(isStanding);
+    celebrated = !everMessy;
+    return true;
   }
 
   // ---------------------------------------------------------- cabinet shake
@@ -260,6 +312,33 @@
       }
       if (jolt > 1.5) everMessy = true;
     }
+    if (jolt > 1.3 && isDoorOpen()) spill(jolt);
+  }
+
+  // With the door open, a hard shake tips books out onto the desk.
+  // Books that are already leaning or lying down go first.
+  function spill(jolt) {
+    for (const bd of books) {
+      if (bd.book.out || tweens.has(bd) || (held && held.body === bd)) continue;
+      const a = Math.abs(normAngle(bd.angle));
+      const tilt = Math.min(a, Math.PI - a);
+      const p = SPILL_RATE * (jolt - 1.3) * (0.25 + Math.min(1, tilt / 0.9));
+      if (rng() < p) fallOut(bd);
+    }
+  }
+
+  function fallOut(bd) {
+    const wp = caseToWorld(bd.position);
+    Composite.remove(world, bd);
+    bd.book.out = true;
+    bd.collisionFilter = DESK_FILTER();
+    Body.setPosition(bd, wp);
+    Body.setAngle(bd, bd.angle + caseTilt());
+    Body.setVelocity(bd, { x: bd.velocity.x * 0.5 + shake.vel.x * 0.004 + rand(-2.2, 2.2), y: rand(-3, -0.6) });
+    Body.setAngularVelocity(bd, rand(-0.16, 0.16));
+    Composite.add(deskWorld, bd);
+    everMessy = true;
+    if (!hinted.has('spill')) hintOnce('spill', 'Whoops, some books fell out. Pick them up off the desk.');
   }
 
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -277,23 +356,35 @@
   }
 
   // --------------------------------------------------------- holding books
-  let held = null; // { body, dx, dy, px, py, moved, t0 }
+  // While held, a book belongs to neither physics world. Its position is in
+  // screen-space (world) coordinates so it can be carried anywhere.
+  let held = null; // { body, dx, dy, px, py }
 
-  function bookAt(p) {
-    const hits = Query.point(books, p);
+  const shelfBooks = () => books.filter((bd) => !bd.book.out && !(held && held.body === bd));
+  const deskBooks = () => books.filter((bd) => bd.book.out && !(held && held.body === bd));
+
+  function bookAt(list, p) {
+    const hits = Query.point(list, p);
     if (hits.length) return hits[hits.length - 1];
     // thin spines are fiddly on touch screens: search a little around the finger
     for (const d of [3, -3, 6, -6, 9, -9]) {
-      const h = Query.point(books, { x: p.x + d, y: p.y });
+      const h = Query.point(list, { x: p.x + d, y: p.y });
       if (h.length) return h[h.length - 1];
     }
     return null;
   }
 
-  function grab(body, p) {
+  function grab(body, w) {
     tweens.delete(body);
-    held = { body, dx: body.position.x - p.x, dy: body.position.y - p.y, px: p.x, py: p.y, t0: performance.now() };
-    body.collisionFilter.mask = 0;
+    body.book.lift = 0;
+    if (body.book.out) {
+      Composite.remove(deskWorld, body);
+    } else {
+      Composite.remove(world, body);
+      Body.setPosition(body, caseToWorld(body.position));
+      Body.setAngle(body, body.angle + caseTilt());
+    }
+    held = { body, dx: body.position.x - w.x, dy: body.position.y - w.y, px: w.x, py: w.y };
     Sound.pick();
   }
 
@@ -310,20 +401,32 @@
     if (!held) return;
     const body = held.body;
     const b = body.book;
-    const s = compAtY(body.position.y);
-    const x = clamp(body.position.x, INNER.l + b.w / 2 + 0.5, INNER.r - b.w / 2 - 0.5);
-    const y = COMPS[s].floor - b.h / 2 - 0.4;
-    // nudge into a free slot if the drop point lands on another book
-    const slotX = findSlot(body, s, x);
-    Body.setAngle(body, 0);
-    Body.setPosition(body, { x: slotX, y });
+    held = null;
+    const cp = toCase(body.position);
+    const overCabinet = cp.x > INNER.l - 8 && cp.x < INNER.r + 8 && cp.y > INNER.t - 8 && cp.y < INNER.b + 8;
     Body.setVelocity(body, { x: 0, y: 0 });
     Body.setAngularVelocity(body, 0);
-    body.collisionFilter.mask = CAT_WALL | CAT_BOOK;
-    b.lift = 0;
-    held = null;
-    Sound.drop();
-    vibrate(6);
+
+    if (overCabinet && isDoorOpen()) {
+      // back onto a shelf, standing up, in the nearest gap
+      const s = compAtY(cp.y);
+      const x = clamp(cp.x, INNER.l + b.w / 2 + 0.5, INNER.r - b.w / 2 - 0.5);
+      const y = COMPS[s].floor - b.h / 2 - 0.4;
+      b.out = false;
+      body.collisionFilter = SHELF_FILTER();
+      Body.setAngle(body, 0);
+      Body.setPosition(body, { x: findSlot(body, s, x), y });
+      Composite.add(world, body);
+      Sound.drop();
+      vibrate(6);
+    } else {
+      // dropped outside (or the glass is shut): it falls to the desk
+      if (overCabinet) hintOnce('closed-drop', 'Open the glass door to put books back on the shelves.');
+      b.out = true;
+      body.collisionFilter = DESK_FILTER();
+      Body.setPosition(body, { x: clamp(body.position.x, 8, W - 8), y: Math.min(body.position.y, DESK_Y - b.h / 2 - 1) });
+      Composite.add(deskWorld, body);
+    }
   }
 
   // Look for the nearest x where this book fits between its neighbours.
@@ -332,7 +435,7 @@
     const c = COMPS[s];
     const spans = [];
     for (const o of books) {
-      if (o === body) continue;
+      if (o === body || o.book.out) continue;
       const bb = o.bounds;
       if (bb.max.y < c.top || bb.min.y > c.floor) continue;
       // only things near the floor block a standing book
@@ -356,10 +459,17 @@
   // ------------------------------------------------------------- auto-sort
   const tweens = new Map(); // body -> tween
 
-  function currentShelfGroups() {
+  function currentShelfGroups(fromDesk) {
     const groups = COMPS.map(() => []);
-    books.forEach((bd) => groups[compAtY(bd.position.y)].push(bd));
+    books.forEach((bd) => { if (!fromDesk.includes(bd)) groups[compAtY(bd.position.y)].push(bd); });
     groups.forEach((g) => g.sort((a, b) => a.position.x - b.position.x));
+    // books rescued from the desk go onto whichever shelf has the most room
+    const width = (g) => g.reduce((a, bd) => a + bd.book.w, 0);
+    fromDesk.forEach((bd) => {
+      let best = groups[0];
+      groups.forEach((g) => { if (width(g) < width(best)) best = g; });
+      best.push(bd);
+    });
     return groups;
   }
 
@@ -384,6 +494,16 @@
 
   function autoSort(mode) {
     if (held) release();
+    // pull everything off the desk back into the cabinet's frame first
+    const fromDesk = books.filter((bd) => bd.book.out);
+    fromDesk.forEach((bd) => {
+      Composite.remove(deskWorld, bd);
+      bd.book.out = false;
+      bd.collisionFilter = SHELF_FILTER();
+      Body.setPosition(bd, toCase(bd.position));
+      Body.setAngle(bd, bd.angle - caseTilt());
+      Composite.add(world, bd);
+    });
     let groups;
     if (mode === 'rainbow') {
       const colorful = (bd) => bd.book.sat > 0.18 && bd.book.lig > 0.12 && bd.book.lig < 0.92;
@@ -395,7 +515,7 @@
       });
       groups = evenGroups(list);
     } else {
-      groups = currentShelfGroups();
+      groups = currentShelfGroups(fromDesk);
       if (mode === 'height') groups.forEach((g) => g.sort((a, b) => b.book.h - a.book.h));
     }
     rebalance(groups);
@@ -414,7 +534,7 @@
         bd.collisionFilter.mask = 0;
         tweens.set(bd, {
           fx: bd.position.x, fy: bd.position.y, fa: a,
-          tx, ty, delay: order * 5, t: 0, dur: 420 + rng() * 120,
+          tx, ty, delay: order * 5, t: 0, dur: 420 + rng() * 120, fromDesk: fromDesk.includes(bd),
         });
         order++;
       });
@@ -440,6 +560,8 @@
         Body.setVelocity(bd, { x: 0, y: 0 });
         Body.setPosition(bd, { x: tw.fx, y: tw.fy });
         Body.setAngle(bd, tw.fa);
+        // books waiting on the desk must stay visible outside the cabinet
+        bd.book.lift = tw.fromDesk ? 0.02 : 0;
         return;
       }
       const e = ease(t);
@@ -447,13 +569,14 @@
       Body.setAngle(bd, tw.fa * (1 - e));
       Body.setVelocity(bd, { x: 0, y: 0 });
       Body.setAngularVelocity(bd, 0);
-      bd.book.lift = Math.sin(Math.PI * t);
+      bd.book.lift = Math.max(tw.fromDesk ? 0.02 : 0, Math.sin(Math.PI * t));
       if (t >= 1) done.push(bd);
     });
     done.forEach((bd) => {
       tweens.delete(bd);
       bd.book.lift = 0;
-      bd.collisionFilter.mask = CAT_WALL | CAT_BOOK;
+      bd.book.lift = 0;
+      bd.collisionFilter = SHELF_FILTER();
       Sound.tick();
     });
   }
@@ -463,6 +586,7 @@
   let celebrated = true;
 
   function isStanding(bd) {
+    if (bd.book.out) return false;
     const a = Math.abs(normAngle(bd.angle));
     const tilt = Math.min(a, Math.PI - a);
     if (tilt > 0.1) return false;
@@ -473,8 +597,13 @@
 
   function updateStatus() {
     let n = 0;
-    for (const bd of books) if (isStanding(bd) && !tweens.has(bd)) n++;
+    let onDesk = 0;
+    for (const bd of books) {
+      if (bd.book.out || (held && held.body === bd)) onDesk += bd.book.out ? 1 : 0;
+      else if (isStanding(bd) && !tweens.has(bd)) n++;
+    }
     standing.textContent = n;
+    deskNote.textContent = onDesk ? ` · ${onDesk} on the desk` : '';
     const pct = books.length ? (n / books.length) * 100 : 0;
     meterFill.style.width = pct.toFixed(1) + '%';
     if (n < books.length - 2) celebrated = false;
@@ -586,7 +715,7 @@
     },
   };
 
-  Events.on(engine, 'collisionStart', (ev) => {
+  const onCollide = (ev) => {
     let best = 0, wood = false;
     for (const pair of ev.pairs) {
       const a = pair.bodyA, b = pair.bodyB;
@@ -597,7 +726,9 @@
       Sound.hit(best - 1.4, wood);
       if (best > 6) vibrate(5);
     }
-  });
+  };
+  Events.on(engine, 'collisionStart', onCollide);
+  Events.on(deskEngine, 'collisionStart', onCollide);
 
   let lastVibe = 0;
   function vibrate(ms) {
@@ -824,26 +955,41 @@
     g.restore();
   }
 
-  function drawBooks(g) {
-    // soft shadows on the back panel, in one pass
-    g.fillStyle = 'rgba(8,3,0,0.38)';
+  // shadows for a set of books, in one pass
+  function drawShadows(g, list, dx, dy, alpha) {
+    g.fillStyle = `rgba(8,3,0,${alpha})`;
     g.beginPath();
-    const lifted = [];
-    for (const bd of books) {
-      if (bd.book.lift > 0.01 || (held && held.body === bd)) { lifted.push(bd); continue; }
+    for (const bd of list) {
       const v = bd.vertices;
-      g.moveTo(v[0].x + 2.6, v[0].y + 1.6);
-      for (let i = 1; i < v.length; i++) g.lineTo(v[i].x + 2.6, v[i].y + 1.6);
+      g.moveTo(v[0].x + dx, v[0].y + dy);
+      for (let i = 1; i < v.length; i++) g.lineTo(v[i].x + dx, v[i].y + dy);
       g.closePath();
     }
     g.fill();
-    for (const bd of books) if (!(bd.book.lift > 0.01 || (held && held.body === bd))) drawBook(g, bd, 1);
+  }
+
+  function drawBooks(g) {
+    const flat = [];
+    const lifted = [];
+    for (const bd of books) {
+      if (bd.book.out || (held && held.body === bd)) continue;
+      (bd.book.lift > 0.01 ? lifted : flat).push(bd);
+    }
+    drawShadows(g, flat, 2.6, 1.6, 0.38);
+    for (const bd of flat) drawBook(g, bd, 1);
     return lifted;
   }
 
-  function drawLifted(g, lifted) {
+  function drawDesk(g) {
+    const list = books.filter((bd) => bd.book.out && !(held && held.body === bd));
+    if (!list.length) return;
+    drawShadows(g, list, 1.5, 2.5, 0.3);
+    for (const bd of list) drawBook(g, bd, 1);
+  }
+
+  function drawLifted(g, lifted, liftOverride) {
     for (const bd of lifted) {
-      const lift = held && held.body === bd ? 1 : bd.book.lift;
+      const lift = liftOverride != null ? liftOverride : bd.book.lift;
       const sc = 1 + 0.14 * lift;
       g.save();
       g.globalAlpha = 0.35 * lift + 0.1;
@@ -999,6 +1145,10 @@
     drawLifted(ctx, lifted);
     drawDoor(ctx);
     ctx.restore();
+
+    // spilled books sit on the desk in front of the cabinet
+    drawDesk(ctx);
+    if (held) drawLifted(ctx, [held.body], 1);
   }
 
   // ---------------------------------------------------------------- input
@@ -1019,6 +1169,17 @@
     return { x: x * Math.cos(a) - y * Math.sin(a), y: x * Math.sin(a) + y * Math.cos(a) };
   }
 
+  function caseTilt() {
+    return shake.off.x * 0.0009;
+  }
+
+  function caseToWorld(p) {
+    const a = caseTilt();
+    const x = p.x * Math.cos(a) - p.y * Math.sin(a);
+    const y = p.x * Math.sin(a) + p.y * Math.cos(a);
+    return { x: x + shake.off.x, y: y + Math.min(0, shake.off.y) };
+  }
+
   const inside = (p, r) => p.x >= r.l && p.x <= r.r && p.y >= r.t && p.y <= r.b;
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -1037,11 +1198,12 @@
       pointer.mode = 'knob';
       return;
     }
-    if (isDoorOpen() && inside(p, INNER)) {
-      const bd = bookAt(p);
+    const onDesk = bookAt(deskBooks(), w);
+    const bd = onDesk || (isDoorOpen() && inside(p, INNER) ? bookAt(shelfBooks(), p) : null);
+    {
       if (bd) {
         pointer.mode = 'book';
-        grab(bd, p);
+        grab(bd, w);
         canvas.classList.add('grabbing');
         return;
       }
@@ -1053,18 +1215,16 @@
   canvas.addEventListener('pointermove', (e) => {
     const w = toWorld(e);
     if (pointer.id === null) {
-      if (isDoorOpen()) {
-        const p = toCase(w);
-        canvas.classList.toggle('over-book', inside(p, INNER) && !!bookAt(p));
-      }
+      const p = toCase(w);
+      const over = !!bookAt(deskBooks(), w) || (isDoorOpen() && inside(p, INNER) && !!bookAt(shelfBooks(), p));
+      canvas.classList.toggle('over-book', over);
       return;
     }
     if (e.pointerId !== pointer.id) return;
     pointer.moved = Math.max(pointer.moved, Math.hypot(w.x - pointer.sx, w.y - pointer.sy));
     if (pointer.mode === 'book' && held) {
-      const p = toCase(w);
-      held.px = clamp(p.x, INNER.l - 10, INNER.r + 10);
-      held.py = clamp(p.y, INNER.t - 10, INNER.b + 10);
+      held.px = clamp(w.x, 4, W - 4);
+      held.py = clamp(w.y, 4, DESK_Y - 4);
     } else if (pointer.mode === 'case') {
       shake.target.x = clamp(w.x - pointer.sx, -MAX_OFFSET.x, MAX_OFFSET.x);
       shake.target.y = clamp(w.y - pointer.sy, -MAX_OFFSET.y, MAX_OFFSET.y);
@@ -1144,6 +1304,7 @@
   const standing = $('standing');
   const total = $('total');
   const meterFill = $('meterFill');
+  const deskNote = $('deskNote');
   const toastEl = $('toast');
   const btnDoor = $('btnDoor');
   const btnSound = $('btnSound');
@@ -1195,6 +1356,7 @@
     const n = clamp(parseInt(countInput.value, 10) || 230, 200, 260);
     store.set('count', n);
     createBooks(n);
+    btnDoor.textContent = door.target > 0.5 ? 'Close door' : 'Open door';
     toast(`A fresh shelf of ${n} books.`);
   });
 
@@ -1226,6 +1388,7 @@
       }
       stepTweens(STEP_MS);
       Engine.update(engine, STEP_MS);
+      Engine.update(deskEngine, STEP_MS);
       acc -= STEP_MS;
       steps++;
     }
@@ -1247,10 +1410,23 @@
 
   new ResizeObserver(resize).observe(canvas);
   resize();
-  createBooks(startCount);
+  const restored = loadState();
+  if (restored) {
+    countInput.value = books.length;
+    countOut.textContent = books.length;
+  } else {
+    createBooks(startCount);
+  }
   updateStatus();
   requestAnimationFrame((t) => { last = t; frame(t); });
-  setTimeout(() => toast('Grab the cabinet and give it a shake, or press Space.', 3600), 400);
+  setTimeout(() => toast(restored
+    ? 'Welcome back. Your shelf is just as you left it.'
+    : 'Grab the cabinet and give it a shake, or press Space.', 3600), 400);
+
+  // keep the shelf between visits
+  setInterval(() => { if (!document.hidden && !held) saveState(); }, 4000);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveState(); });
+  window.addEventListener('pagehide', saveState);
 
   // handy for poking at things from the console
   window.bookshelf = { engine, books: () => books, shake: startShake, sort: autoSort, door: setDoor };
