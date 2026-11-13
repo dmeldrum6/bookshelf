@@ -1,6 +1,9 @@
 # Anxiety Bookshelf
 
 A small, glass-fronted wooden cabinet holding 200–260 miniature foam books, built in plain HTML and JavaScript. It's made for a simple, repetitive routine that eases stress: **shake it, then sort it.**
+<img width="767" height="875" alt="image" src="https://github.com/user-attachments/assets/bcd5d325-a1ce-4427-bf0a-800de6ef81a5" />
+<img width="770" height="881" alt="image" src="https://github.com/user-attachments/assets/72986dae-5a95-41e3-b0f2-50927aeb5422" />
+
 
 ## Running it
 
